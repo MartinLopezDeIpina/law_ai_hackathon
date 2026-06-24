@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+httpx
+neo4j
+tqdm
+pydantic
+pydantic-settings
+langgraph
+langchain-core
+langchain-anthropic
+sentence-transformers
+torch
