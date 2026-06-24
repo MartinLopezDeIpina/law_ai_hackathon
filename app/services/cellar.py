@@ -13,6 +13,8 @@ from __future__ import annotations
 import httpx
 import logging
 
+from tqdm import tqdm
+
 from app.core.config import SPARQL_ENDPOINT
 
 logger = logging.getLogger(__name__)
@@ -70,46 +72,72 @@ async def fetch_document_text(work_uri: str) -> str | None:
     return response.text
 
 
-_SPARQL_BATCH = 50
+_SPARQL_BATCH = 20
 
 
 def _values_clause(uris: list[str]) -> str:
     return " ".join(f"<{uri}>" for uri in uris)
 
 
-async def _batch_query(make_query, work_uris: list[str]) -> list[dict]:
+async def _batch_query(make_query, work_uris: list[str], desc: str = "", position: int = 0) -> list[dict]:
     """Run make_query for each 50-URI chunk of work_uris and concatenate results."""
     results = []
-    for i in range(0, len(work_uris), _SPARQL_BATCH):
-        batch = work_uris[i : i + _SPARQL_BATCH]
+    batches = [work_uris[i : i + _SPARQL_BATCH] for i in range(0, len(work_uris), _SPARQL_BATCH)]
+    for batch in tqdm(batches, desc=desc, unit="batch", disable=not desc, position=position, leave=True):
         try:
             results.extend(await _run_query(make_query(batch)))
         except httpx.HTTPError as e:
-            logger.warning("SPARQL batch %d–%d failed: %s", i, i + len(batch), e)
+            logger.warning("SPARQL batch failed: %s", e)
     return results
 
 
-async def fetch_concepts(work_uris: list[str]) -> list[dict]:
+async def fetch_concepts(work_uris: list[str], position: int = 0) -> list[dict]:
     """Return all English EuroVoc concept labels for the given work URIs.
 
     Each row: ``work``, ``concept`` (URI), ``label``.
+
+    Split into two queries to avoid the expensive 3-way join on every batch:
+      1. work → concept URI  (fast single-hop predicate lookup)
+      2. concept URI → label (simple VALUES lookup on the unique concepts found)
     """
-    def make_query(batch: list[str]) -> str:
+    def make_work_concept_query(batch: list[str]) -> str:
         return f"""
             PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
-            PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-            SELECT DISTINCT ?work ?concept ?label
+            SELECT DISTINCT ?work ?concept
             WHERE {{
                 VALUES ?work {{ {_values_clause(batch)} }}
                 ?work cdm:work_is_about_concept_eurovoc ?concept .
+            }}
+        """
+
+    def make_label_query(batch: list[str]) -> str:
+        return f"""
+            PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+            SELECT DISTINCT ?concept ?label
+            WHERE {{
+                VALUES ?concept {{ {_values_clause(batch)} }}
                 ?concept skos:prefLabel ?label .
                 FILTER(LANG(?label) = "en")
             }}
         """
-    return await _batch_query(make_query, work_uris)
+
+    work_concepts = await _batch_query(
+        make_work_concept_query, work_uris, desc="Fetching concepts", position=position
+    )
+
+    concept_uris = list({row["concept"] for row in work_concepts})
+    concept_labels = await _batch_query(
+        make_label_query, concept_uris, desc="Fetching concept labels", position=position
+    )
+    label_by_uri = {row["concept"]: row["label"] for row in concept_labels}
+
+    return [
+        {"work": row["work"], "concept": row["concept"], "label": label_by_uri.get(row["concept"])}
+        for row in work_concepts
+    ]
 
 
-async def fetch_citations(work_uris: list[str]) -> list[dict]:
+async def fetch_citations(work_uris: list[str], position: int = 1) -> list[dict]:
     """Return works cited by the given work URIs.
 
     Each row: ``work``, ``cited_work`` (URI), ``cited_celex`` (optional).
@@ -124,10 +152,10 @@ async def fetch_citations(work_uris: list[str]) -> list[dict]:
                 OPTIONAL {{ ?cited_work cdm:resource_legal_id_celex ?cited_celex }}
             }}
         """
-    return await _batch_query(make_query, work_uris)
+    return await _batch_query(make_query, work_uris, desc="Fetching citations", position=position)
 
 
-async def fetch_agents(work_uris: list[str]) -> list[dict]:
+async def fetch_agents(work_uris: list[str], position: int = 2) -> list[dict]:
     """Return agents (institutions/authors) responsible for the given work URIs.
 
     Each row: ``work``, ``agent`` (URI), ``label`` (optional English label).
@@ -143,7 +171,7 @@ async def fetch_agents(work_uris: list[str]) -> list[dict]:
                 OPTIONAL {{ ?agent skos:prefLabel ?label FILTER(LANG(?label) = "en") }}
             }}
         """
-    return await _batch_query(make_query, work_uris)
+    return await _batch_query(make_query, work_uris, desc="Fetching agents", position=position)
 
 
 async def run_query(query: str) -> list[dict]:
