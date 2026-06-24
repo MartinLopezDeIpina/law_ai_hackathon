@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from neo4j import AsyncGraphDatabase
+from neo4j import AsyncGraphDatabase, NotificationDisabledClassification
 
 from app.core.config import NEO4J_AUTH, NEO4J_URI
+
+_DRIVER_KWARGS = {
+    "notifications_disabled_classifications": [NotificationDisabledClassification.UNRECOGNIZED],
+}
+from app.core.embeddings import get_embedder
 from app.core.models import Agent, Concept, ExpandedWork, Work
-from app.services.cellar_retrieve_pipeline.embedding_pipeline import get_model
 
 _VECTOR_SEARCH = """
 CALL db.index.vector.queryNodes($index_name, $k, $embedding)
@@ -44,9 +48,9 @@ async def search(query: str, k: int = 5, label: str = "Work") -> list[dict[str, 
     """
     if label not in _INDEX_NAMES:
         raise ValueError(f"label must be one of {list(_INDEX_NAMES)}")
-    embedding = get_model().encode(query, convert_to_numpy=True).tolist()
+    embedding = get_embedder().embed_query(query)
 
-    async with AsyncGraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH) as driver:
+    async with AsyncGraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH, **_DRIVER_KWARGS) as driver:
         async with driver.session() as session:
             result = await session.run(
                 _VECTOR_SEARCH,
@@ -75,7 +79,7 @@ async def search_expanded(query: str, k: int = 5) -> list[dict[str, Any]]:
     score_by_uri = {r["uri"]: r["score"] for r in base_results}
     props_by_uri = {r["uri"]: r for r in base_results}
 
-    async with AsyncGraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH) as driver:
+    async with AsyncGraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH, **_DRIVER_KWARGS) as driver:
         async with driver.session() as session:
             result = await session.run(_EXPAND_WORKS, uris=uris)
             expansion = {row["uri"]: row for row in await result.data()}

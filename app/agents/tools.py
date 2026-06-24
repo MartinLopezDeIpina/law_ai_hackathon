@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from app.services import cellar
+from app.services import cellar, rag
 
 
 @tool
@@ -34,5 +34,17 @@ async def get_eu_document(celex: str) -> dict | None:
     return await cellar.get_document_by_celex(celex)
 
 
+@tool
+async def rag_search(query: str, k: int = 5) -> list[dict]:
+    """Search the EU legislation knowledge base using semantic similarity.
+
+    Use this as the primary research tool. Returns top-k documents from the
+    local knowledge base, each expanded with related concepts, citations, and
+    authors. Prefer this over search_eu_legislation when looking for thematic
+    or contextual matches rather than keyword titles.
+    """
+    return await rag.search_expanded(query, k=k)
+
+
 # Exposed as a list so the graph can bind the whole toolset in one place.
-TOOLS = [search_eu_legislation, get_eu_document]
+TOOLS = [search_eu_legislation, get_eu_document, rag_search]
